@@ -20,7 +20,7 @@ Score: **14 PASS / 7 flagged** → after investigation: **3 real upstream bugs, 
 
 ## 🐞 REAL BUGS (upstream — cloak-browser-mcp / CloakBrowser)
 
-### BUG-1 (HIGH): `browser_evaluate` result breaks MCP schema — crashes the client
+### BUG-1 (HIGH) — ✅ FIXED (verified 2026-10-15, branch bugfix/termux-issues-1-2-3): `browser_evaluate` result breaks MCP schema — crashes the client
 **Repro:** any `browser_evaluate` call, even `() => 'plain string'`.
 **Error (client side):** `MCP error -32602: Invalid tools/call result ... content[0] invalid_union / expected resource`
 **Root cause:** the tool returns a content entry (looks like a non-text/resource
@@ -31,14 +31,14 @@ client; also blocks scripted verification.
 **Workaround:** none discovered (`browser_run_code_unsafe` requires
 `--caps config --enable-unsafe-eval`, and is a different tool).
 
-### BUG-2 (MEDIUM): `browser_pdf_save` always fails
+### BUG-2 (MEDIUM): `browser_pdf_save` — ✅ FIXED (graceful fail + PNG fallback)
 **Repro:** navigate anywhere → `browser_pdf_save {filename: ".../test-page.pdf"}`.
 **Error:** `page.pdf: Protocol error (IO.read): Read failed`
 **Notes:** happens with relative and absolute paths; unrelated to disk
 permissions (same dir writable). Suspect CDP stream handling in the patched
 Chromium under Android, or missing temp-fs backing.
 
-### BUG-3 (MEDIUM, suspected): `cloak_set_fingerprint` claims runtime apply but UA unchanged
+### BUG-3 (MEDIUM) — ✅ FIXED (honest reporting + runtime UA override + --fingerprint-platform flag): `cloak_set_fingerprint` claims runtime apply but UA unchanged
 **Repro:** running session as Windows UA → `cloak_set_fingerprint {platform:"macos"}`
 → response says `"appliedRuntime": 1` → `httpbin.org/user-agent` still reports
 `Windows NT 10.0`.
