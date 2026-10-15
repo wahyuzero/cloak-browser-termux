@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# cloak-browser-mcp-termux — run cloak-browser-mcp natively in Termux (Android).
+# Sets the exact environment the glibc Chromium needs, then execs the MCP server.
+# See README.md at https://github.com/wahyuzero/cloak-browser-termux
+
+H="${HOME}"
+GLIB="$H/../usr/glibc/lib"
+SPOOF="$H/.cloakbrowser-termux/spoof-platform.mjs"
+BIN="$H/../usr/lib/node_modules/@devinwangd/cloak-browser-mcp/dist/index.js"
+
+export LD_LIBRARY_PATH=""
+export LD_PRELOAD=""
+export FONTCONFIG_PATH="$GLIB/../etc/fonts"
+export TMPDIR="$H/../usr/tmp"
+export NODE_OPTIONS="--import $SPOOF"
+
+# Run via node directly: the dist entry has no shebang, and /usr/bin/env is
+# unavailable under a clean (termux-exec-free) environment.
+exec node "$BIN" "$@"
