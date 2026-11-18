@@ -256,3 +256,55 @@ GNU find does not follow symlinks by default. Verified with
 `--caps all`.
 **Fix:** use `--self-test --caps all`; the MCP client config already passes
 `--caps all`.
+
+---
+
+## Round 3 — headed mode (the Xvfb saga)
+
+### 12. `launched a headed browser without an XServer`
+
+**Cause:** the MCP server **defaults to headed** (`headless: false`); Android
+has no X server.
+**Fix:** installer now installs `x11-repo` + `xorg-server-xvfb`, and the
+launcher auto-starts `Xvfb :99` (1280x720x24, `-nolisten tcp`) whenever the
+args lack `--headless` and `$DISPLAY` is unset. A healthy Xvfb is reused via a
+pidfile. If you run Termux:X11 or another X server, export `DISPLAY` and the
+launcher stays out of the way.
+
+### 13. How does glibc Chromium reach Termux's Xvfb? (no `/tmp/.X11-unix`)
+
+Android's `/tmp` is read-only and absent, so Xvfb's socket lands in
+`$PREFIX/tmp/.X11-unix/X99`. Debian's libX11 (used by Chromium) looks in
+`/tmp/.X11-unix` — but it first tries the **abstract namespace** socket
+(`\0/tmp/.X11-unix/X99`), which Termux's Xvfb also creates. Result: the
+connection just works, no bind-mounts or hacks needed. (Verified: headed
+Chromium creates windows and renders under Xvfb.)
+
+### 14. Headed chrome *renders fine* but `--dump-dom`/`--screenshot` never return
+
+**Symptom:** under Xvfb, `chrome --dump-dom data:...` hangs forever; window
+appears, title updates, renderer runs — but the CLI never prints and never
+exits (`exit=124` after timeout).
+**Diagnosis:** `--dump-dom` waits for a completion signal through the same
+pipeline that also relies on process-exit messaging; under this build the
+browser-main loop never delivers it in headed mode. **This is CLI-only**: the
+DevTools/CDP interface (what playwright-core and the MCP server use) is fully
+functional — verified end-to-end: `browser_navigate` → `browser_snapshot` →
+`browser_evaluate` all pass against headed Chromium.
+**Consequence for the installer:** the headed smoke test cannot use
+`--dump-dom`. It instead launches with `--remote-debugging-port` and polls
+`/json/list` until the page title `"Example Domain"` appears — the title only
+exists if the renderer actually parsed the page.
+
+### 15. Red herrings encountered on the way
+
+- `Failed global descriptor lookup: 7` — appears in **headless** (working)
+runs too; unrelated to the hang.
+- SysV `shmget` is blocked by Android seccomp (SIGSYS) while `memfd_create`
+works — interesting, but also unrelated: Chromium uses memfd.
+- `pkill -x chrome` cannot kill a hung headed chrome (its SIGTERM handler is
+stuck); use `pkill -9 -x chrome` when experimenting.
+- A hung headed chrome silently poisons later runs: new invocations print
+`Opening in existing browser session` and **exit 0 with no output** (the
+ProcessSingleton hands off to the zombie). Always kill -9 leftover chrome
+before retesting.

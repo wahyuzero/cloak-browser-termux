@@ -38,9 +38,12 @@ mkdir -p "$DEBFIX" "$WORK"
 # Step 0 — packages needed by the installer itself
 # ----------------------------------------------------------------------------
 echo ""
-warn "Step 0/7 — installing build tools (patchelf, typescript, xz)..."
+warn "Step 0/7 — installing build tools (patchelf, typescript, xz, Xvfb)..."
 pkg install -y patchelf xz-utils tur-repo >/dev/null 2>&1
 pkg install -y glibc-runner >/dev/null 2>&1   # provides the glibc bundle at $PREFIX/glibc
+# Xvfb enables headed (visible-window) mode; headless still works without it.
+pkg install -y x11-repo >/dev/null 2>&1
+pkg install -y xorg-server-xvfb >/dev/null 2>&1 || warn "Xvfb install failed — headed mode disabled (headless unaffected)"
 command -v patchelf >/dev/null || die "patchelf failed to install"
 command -v npm >/dev/null || die "npm not found"
 ok "Build tools ready"
@@ -252,25 +255,63 @@ cat > "$WORK/spoof-platform.mjs" <<'EOF'
 Object.defineProperty(process, "platform", { value: "linux" });
 EOF
 
-cat > "$HOME/../usr/bin/cloak-browser-mcp-termux" <<EOF
+cat > "$HOME/../usr/bin/cloak-browser-mcp-termux" <<'LAUNCHER_EOF'
 #!/data/data/com.termux/files/usr/bin/bash
-# Launcher: runs cloak-browser-mcp natively in Termux with a clean env.
-# See README.md — https://github.com/wahyuzero/cloak-browser-termux
-H="\$HOME"
-GLIB="\$H/../usr/glibc/lib"
-SPOOF="\$H/.cloakbrowser-termux/spoof-platform.mjs"
-BIN="\$H/../usr/lib/node_modules/@devinwangd/cloak-browser-mcp/dist/index.js"
+# cloak-browser-mcp-termux — run cloak-browser-mcp natively in Termux (Android).
+# Sets the exact environment the glibc Chromium needs, then execs the MCP server.
+# See README.md at https://github.com/wahyuzero/cloak-browser-termux
+
+H="${HOME}"
+GLIB="$H/../usr/glibc/lib"
+SPOOF="$H/.cloakbrowser-termux/spoof-platform.mjs"
+BIN="$H/../usr/lib/node_modules/@devinwangd/cloak-browser-mcp/dist/index.js"
+XVFB_LOG="$H/.cloakbrowser-termux/xvfb.log"
 
 export LD_LIBRARY_PATH=""
 export LD_PRELOAD=""
-export FONTCONFIG_PATH="\$GLIB/../etc/fonts"
-export TMPDIR="\$H/../usr/tmp"
-export NODE_OPTIONS="--import \$SPOOF"
+export FONTCONFIG_PATH="$GLIB/../etc/fonts"
+export TMPDIR="$H/../usr/tmp"
+export NODE_OPTIONS="--import $SPOOF"
+
+# -------------------------------------------------------------------------
+# Headed mode support: the MCP server defaults to headed (visible) Chromium,
+# which needs an X server. Android has none, so transparently provide Xvfb.
+# Headless runs skip this entirely.
+# -------------------------------------------------------------------------
+case " $* " in
+  *" --headless "*) : ;;                       # explicit headless → nothing to do
+  *)
+    if [[ -z "${DISPLAY:-}" ]]; then
+      XVFB_DISPLAY=":99"
+      if ! command -v Xvfb >/dev/null 2>&1; then
+        echo "cloak-browser-mcp-termux: headed mode needs Xvfb. Install it with:" >&2
+        echo "  pkg install x11-repo && pkg install xorg-server-xvfb" >&2
+        echo "(or pass --headless for headless operation)." >&2
+        exit 1
+      fi
+      # Reuse a healthy Xvfb on :99 if one is already up (cheap daemon, few MB).
+      if ! kill -0 "$(cat "$H/.cloakbrowser-termux/xvfb.pid" 2>/dev/null)" 2>/dev/null; then
+        # Termux Xvfb puts its socket in $PREFIX/tmp/.X11-unix; glibc clients
+        # reach it through the abstract-namespace socket, so no /tmp needed.
+        Xvfb "$XVFB_DISPLAY" -screen 0 1280x720x24 -nolisten tcp \
+          >"$XVFB_LOG" 2>&1 &
+        echo $! > "$H/.cloakbrowser-termux/xvfb.pid"
+        # Wait for the X server socket to appear (max ~10 s).
+        SOCK="$H/../usr/tmp/.X11-unix/X${XVFB_DISPLAY#:}"
+        for _ in $(seq 1 40); do
+          [[ -S "$SOCK" ]] && break
+          sleep 0.25
+        done
+      fi
+      export DISPLAY="$XVFB_DISPLAY"
+    fi
+    ;;
+esac
 
 # Run via node directly: the dist entry has no shebang, and /usr/bin/env is
 # unavailable under a clean (termux-exec-free) environment.
-exec node "\$BIN" "\$@"
-EOF
+exec node "$BIN" "$@"
+LAUNCHER_EOF
 chmod +x "$HOME/../usr/bin/cloak-browser-mcp-termux"
 mkdir -p "$HOME/../usr/tmp"
 ok "Launcher installed: cloak-browser-mcp-termux"
@@ -284,8 +325,38 @@ OUT=$(env -u LD_LIBRARY_PATH -u LD_PRELOAD \
   FONTCONFIG_PATH="$HOME/../usr/glibc/etc/fonts" \
   "$CHROME_DIR/chrome" --headless --no-sandbox --disable-gpu --disable-crashpad \
   --disable-dev-shm-usage --dump-dom https://example.com 2>/dev/null)
-echo "$OUT" | grep -q "<html" || die "Smoke test failed — Chromium cannot render. See messages above."
-ok "Chromium renders live HTTPS pages 🎉"
+echo "$OUT" | grep -q "<html" || die "Smoke test failed — Chromium cannot render. Re-run install.sh (idempotent) or see docs/TROUBLESHOOTING.md"
+ok "Chromium renders live HTTPS pages (headless) 🎉"
+
+# Headed smoke test: same page under Xvfb, verified through the DevTools
+# endpoint — the page *title* only exists if the renderer actually ran.
+# (NB: chrome's --dump-dom/--screenshot CLI completion paths hang under a
+# headed glibc-on-Android build; the CDP path used by the MCP server is fine.)
+if command -v Xvfb >/dev/null 2>&1; then
+  warn "Step 7b — headed smoke test (Xvfb + DevTools title check)..."
+  if ! kill -0 "$(cat "$WORK/xvfb.pid" 2>/dev/null)" 2>/dev/null; then
+    Xvfb :99 -screen 0 1280x720x24 -nolisten tcp >"$WORK/xvfb.log" 2>&1 &
+    echo $! > "$WORK/xvfb.pid"
+  fi
+  for _ in $(seq 1 40); do [[ -S "$HOME/../usr/tmp/.X11-unix/X99" ]] && break; sleep 0.25; done
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD FONTCONFIG_PATH="$HOME/../usr/glibc/etc/fonts" \
+    DISPLAY=:99 "$CHROME_DIR/chrome" --no-sandbox --disable-gpu --disable-crashpad \
+    --disable-dev-shm-usage --remote-debugging-port=9333 --user-data-dir="$WORK/smoke-headed" \
+    https://example.com >/dev/null 2>&1 &
+  SMOKE_PID=$!
+  HEADOK=""
+  for _ in $(seq 1 24); do            # wait up to ~24 s for the renderer
+    T=$(curl -s http://127.0.0.1:9333/json/list 2>/dev/null | grep -o '"title": *"[^"]*"' | head -1)
+    [[ "$T" == *"Example Domain"* ]] && { HEADOK=1; break; }
+    sleep 1
+  done
+  kill -9 "$SMOKE_PID" 2>/dev/null; pkill -9 -P "$SMOKE_PID" 2>/dev/null
+  if [[ -n "$HEADOK" ]]; then
+    ok "Headed mode works under Xvfb (renderer produced page title) 🖥️"
+  else
+    warn "Headed smoke test failed — headed mode may not work; headless is unaffected"
+  fi
+fi
 
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════${NC}"

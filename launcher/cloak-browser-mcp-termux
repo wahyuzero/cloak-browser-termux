@@ -7,12 +7,49 @@ H="${HOME}"
 GLIB="$H/../usr/glibc/lib"
 SPOOF="$H/.cloakbrowser-termux/spoof-platform.mjs"
 BIN="$H/../usr/lib/node_modules/@devinwangd/cloak-browser-mcp/dist/index.js"
+XVFB_LOG="$H/.cloakbrowser-termux/xvfb.log"
 
 export LD_LIBRARY_PATH=""
 export LD_PRELOAD=""
 export FONTCONFIG_PATH="$GLIB/../etc/fonts"
 export TMPDIR="$H/../usr/tmp"
 export NODE_OPTIONS="--import $SPOOF"
+
+# ---------------------------------------------------------------------------
+# Headed mode support: the MCP server defaults to headed (visible) Chromium,
+# which needs an X server. Android has none, so transparently provide Xvfb.
+# Headless runs skip this entirely.
+# ---------------------------------------------------------------------------
+case " $* " in
+  *" --headless "*) : ;;                       # explicit headless → nothing to do
+  *)
+    if [[ -z "${DISPLAY:-}" ]]; then
+      XVFB_DISPLAY=":99"
+      if ! command -v Xvfb >/dev/null 2>&1; then
+        echo "cloak-browser-mcp-termux: headed mode needs Xvfb. Install it with:" >&2
+        echo "  pkg install x11-repo && pkg install xorg-server-xvfb" >&2
+        echo "(or pass --headless for headless operation)." >&2
+        exit 1
+      fi
+      # Reuse a healthy Xvfb on :99 if one is already up (cheap daemon, few MB).
+      if ! kill -0 "$(cat "$H/.cloakbrowser-termux/xvfb.pid" 2>/dev/null)" 2>/dev/null; then
+        # Termux Xvfb puts its socket in $PREFIX/tmp/.X11-unix; glibc clients
+        # reach it through the abstract-namespace socket, so no /tmp needed.
+        Xvfb "$XVFB_DISPLAY" -screen 0 1280x720x24 -nolisten tcp \
+          >"$XVFB_LOG" 2>&1 &
+        echo $! > "$H/.cloakbrowser-termux/xvfb.pid"
+        # Wait for the X server socket to appear (max ~10 s). Termux's Xvfb
+        # creates it under $PREFIX/tmp/.X11-unix/.
+        SOCK="$H/../usr/tmp/.X11-unix/X${XVFB_DISPLAY#:}"
+        for _ in $(seq 1 40); do
+          [[ -S "$SOCK" ]] && break
+          sleep 0.25
+        done
+      fi
+      export DISPLAY="$XVFB_DISPLAY"
+    fi
+    ;;
+esac
 
 # Run via node directly: the dist entry has no shebang, and /usr/bin/env is
 # unavailable under a clean (termux-exec-free) environment.

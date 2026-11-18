@@ -27,7 +27,7 @@ The installer (~10–20 min, mostly the 200 MB Chromium download) does everythin
 | 4 | Loops until **every** shared library Chromium needs is resolved from Debian arm64 + TUR glibc |
 | 5 | Installs fontconfig + fonts (Chromium crashes without them) |
 | 6 | Writes the `cloak-browser-mcp-termux` launcher + platform spoof |
-| 7 | Smoke test: renders `https://example.com` headlessly |
+| 7 | Smoke test: renders `https://example.com` headlessly, then **headed under Xvfb** (verified via DevTools title check) |
 
 ## Wire it into your MCP client
 
@@ -42,7 +42,7 @@ The installer (~10–20 min, mostly the 200 MB Chromium download) does everythin
 }
 ```
 
-> `--headless` is **required** on Android (no X server). The default mode is headed and will fail with "launched a headed browser without an XServer".
+> `--headless` runs fully headless. **Headed mode is supported too**: omit `--headless` and the launcher transparently starts Xvfb (`:99`) and sets `DISPLAY` — no X server knowledge required. If you export `DISPLAY` yourself (e.g. Termux:X11), the launcher respects it and skips Xvfb.
 
 Quick check without a client:
 
@@ -92,7 +92,7 @@ Any process spawning this launcher (MCP client) just works; nothing else needs c
 
 ## Known limitations
 
-- **Headless only** — install `x11-repo` + `xorg-server-xvfb` and run under `xvfb-run` if you need headed mode (stealth audit may score differently).
+- **Headed mode** works via the launcher's built-in Xvfb fallback (verified: navigate/snapshot/evaluate all pass against a visible-window Chromium). Note that Chrome's `--dump-dom`/`--screenshot` CLI completion paths hang under headed glibc-on-Android — use the MCP/CDP interface (that's what AI agents use anyway).
 - **aarch64 only.**
 - Chromium is version-locked to whatever CloakHQ ships; a future CloakBrowser update may require re-running the lib loop (just re-run `install.sh` — it is idempotent).
 - ~1.5 GB disk total (glibc bundle + Chromium + libs + fonts).
