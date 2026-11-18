@@ -23,6 +23,10 @@ command -v pkg >/dev/null || die "This must run inside Termux."
 command -v node >/dev/null || pkg install -y nodejs || die "Install nodejs first: pkg install nodejs"
 ok "Environment check passed (Termux aarch64 + Node $(node --version))"
 
+# PnP guard: payload (~1.6 GB) + npm/deb temp needs ~2.5 GB free.
+FREE_KB=$(df -P "$HOME" | awk 'NR==2 {print $4}')
+[[ "${FREE_KB:-0}" -ge 2621440 ]] || die "Need ≥2.5 GB free storage (found $(( ${FREE_KB:-0} / 1024 )) MB free). Chromium + glibc + libs ≈ 1.6 GB."
+
 REPO_SRC="${HOME}/cloak-browser-mcp-src"
 GLIB="$HOME/../usr/glibc/lib"
 DEBFIX="${HOME}/.cache/debfix"
@@ -52,15 +56,25 @@ if [[ ! -d "$REPO_SRC" ]]; then
 fi
 cd "$REPO_SRC"
 
+# Build deps must exist locally or tsc cannot resolve zod and friends.
+if [[ ! -d node_modules/zod ]]; then
+  echo "    installing build dependencies (npm ci)..."
+  npm ci --no-audit --no-fund >"$WORK/npm-deps.log" 2>&1 \
+    || npm i --no-audit --no-fund >"$WORK/npm-deps.log" 2>&1 \
+    || die "npm install failed — see $WORK/npm-deps.log"
+fi
+
 # TypeScript >=5.6 ships native binaries that do not support Android; use 5.5 (pure JS).
 npm i -g typescript@5.5.4 >/dev/null 2>&1 || die "typescript install failed"
-if ! npm i -g . >/dev/null 2>&1; then
-  warn "Strict build failed (known upstream issue on TS>=5.6); retrying with relaxed build..."
-  # Patch the one file that fails TS7006 under 5.5
-  sed -i 's/\.map((el: any)/.map((el: any)/' src/tools/testing.ts 2>/dev/null
-  sed -i 's/data\.map((el)/data.map((el: any)/' src/tools/testing.ts 2>/dev/null
-  npm i -g . >/dev/null 2>&1 || die "npm install -g . failed even after patching"
+if ! npm i -g . >"$WORK/npm-build.log" 2>&1; then
+  warn "Strict build failed (known upstream issue); relaxing tsconfig and retrying..."
+  cp tsconfig.json tsconfig.json.orig
+  sed -i 's/"strict": true/"strict": false/; s/"noImplicitAny": true/"noImplicitAny": false/; s/"noImplicitReturns": true/"noImplicitReturns": false/; s/"noUnusedLocals": true/"noUnusedLocals": false/; s/"noUnusedParameters": true/"noUnusedParameters": false/' tsconfig.json
+  npm i -g . >"$WORK/npm-build2.log" 2>&1 \
+    || die "npm install -g . failed even after relaxing tsconfig — see $WORK/npm-build2.log"
 fi
+[[ -f "$PREFIX/lib/node_modules/@devinwangd/cloak-browser-mcp/dist/index.js" ]] \
+  || die "MCP server installed but dist/index.js missing — build did not complete"
 command -v cloak-browser-mcp >/dev/null || die "cloak-browser-mcp binary not on PATH"
 ok "MCP server installed globally (80 tools)"
 
@@ -71,14 +85,42 @@ echo ""
 warn "Step 2/7 — downloading CloakBrowser Chromium (~200 MB, be patient)..."
 cat > "$WORK/dl.mjs" <<'EOF'
 Object.defineProperty(process, 'platform', { value: 'linux' });
-const mod = await import('cloakbrowser/dist/download.js');
+// ESM cannot resolve 'cloakbrowser' from $WORK, so import it from inside the
+// installed MCP server (or the local source checkout) by absolute path.
+import { execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+const PREFIX = process.env.PREFIX || `${homedir()}/../usr`;
+const known = [
+  `${PREFIX}/lib/node_modules/@devinwangd/cloak-browser-mcp/node_modules/cloakbrowser`,
+  `${homedir()}/cloak-browser-mcp-src/node_modules/cloakbrowser`,
+];
+let CB = known.find(p => existsSync(p));
+if (!CB) {
+  // NB: -L is required — npm may leave symlinks in node_modules, and GNU find
+  // does not follow them by default.
+  CB = execSync(
+    `find -L "${PREFIX}/lib/node_modules" "${homedir()}/cloak-browser-mcp-src/node_modules" -maxdepth 6 -type d -name cloakbrowser 2>/dev/null | head -1`
+  ).toString().trim();
+}
+if (!CB) {
+  console.error('cloakbrowser package not found — is the MCP server installed?');
+  process.exit(1);
+}
+const mod = await import(`file://${CB}/dist/download.js`);
 const ensure = mod.ensureBinary || mod.installChromium;
 const r = await ensure();
 console.log('OK:', typeof r === 'string' ? r : JSON.stringify(r));
 EOF
 DL_OUT=$(node "$WORK/dl.mjs" 2>&1 | grep "^OK:" | cut -d' ' -f2-)
-CHROME_DIR=$(dirname "${DL_OUT:-}")
-[[ -n "$CHROME_DIR" && -d "$CHROME_DIR" ]] || die "Chromium download failed. Output: ${DL_OUT:-<empty>}"
+# Accept either "<dir>" or "<dir>/chrome" and verify the binary actually exists.
+# A dirname-only check once accepted "." and silently skipped patchelf + lib loop.
+CHROME_DIR=""
+for CAND in "${DL_OUT:-}" "$(dirname "${DL_OUT:-}")"; do
+  [[ -f "$CAND/chrome" ]] && CHROME_DIR="$CAND" && break
+done
+[[ -n "$CHROME_DIR" ]] || die "Chromium download failed. Output: ${DL_OUT:-<empty>}"
+ok "Chromium downloaded to $CHROME_DIR"
 ok "Chromium downloaded to $CHROME_DIR"
 
 # ----------------------------------------------------------------------------
@@ -104,6 +146,7 @@ warn "Step 4/7 — resolving shared libraries (this loops until none are missing
 run_chrome() { env -u LD_LIBRARY_PATH -u LD_PRELOAD "$CHROME_DIR/chrome" "$@"; }
 
 IDX="$HOME/../usr/var/tmp/debian-arm64-packages.idx"
+mkdir -p "$(dirname "$IDX")"
 if [[ ! -s "$IDX" ]]; then
   echo "    downloading Debian arm64 package index (~9 MB)..."
   curl -sL http://deb.debian.org/debian/dists/stable/main/binary-arm64/Packages.xz \
@@ -178,7 +221,7 @@ for i in $(seq 1 80); do
   echo "    [$i] $BASE ← $PKG"
   fetch_deb "$PKG" || warn "fetch of $PKG failed, continuing..."
 done
-run_chrome --version >/dev/null 2>&1 || die "Chromium still cannot start — see messages above"
+run_chrome --version >/dev/null 2>&1 || die "Chromium still cannot start. Re-run install.sh (idempotent) to continue the lib loop, or see docs/TROUBLESHOOTING.md"
 ok "Chromium starts: $(run_chrome --version 2>&1 | head -1)"
 
 # ----------------------------------------------------------------------------
@@ -261,7 +304,7 @@ echo '      }'
 echo '    }'
 echo ""
 echo "  Test manually:"
-echo "    cloak-browser-mcp-termux --self-test"
+echo "    cloak-browser-mcp-termux --self-test --caps all   # → 80 tools registered"
 echo ""
 echo "  Chromium location : $CHROME_DIR"
 echo "  Launcher          : $HOME/../usr/bin/cloak-browser-mcp-termux"

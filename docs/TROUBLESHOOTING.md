@@ -203,3 +203,56 @@ env -u LD_LIBRARY_PATH -u LD_PRELOAD \
 ```
 
 If this prints HTML, everything above is satisfied and the MCP layer will work.
+
+---
+
+## Field log round 2 — installer bugs found on a fresh device (Android 12, Termux, Node 26)
+
+### 7. `npm install -g .` fails with a wall of TS2307/TS7006/TS7031
+
+**Where:** `npm run build` inside the global install's prepare script.
+**Cause:** two separate things: (a) `node_modules` was never populated in the
+source checkout, so `zod` cannot be resolved; (b) the strict tsconfig produces
+implicit-any errors across many files (not just the one `testing.ts` the old
+patch touched).
+**Fix (automated in install.sh):** run `npm ci`/`npm i` in `$REPO_SRC` before
+building, and on strict-build failure relax the tsconfig flags (`strict`,
+`noImplicitAny`, `noImplicitReturns`, `noUnusedLocals`, `noUnusedParameters`),
+then retry. npm output goes to `$WORK/npm-*.log` instead of `/dev/null` so
+failures are actually visible.
+
+### 8. `install.sh: line NNN: .../debian-arm64-packages.idx: No such file or directory`
+
+**Where:** Step 4 index download.
+**Cause:** `$PREFIX/var/tmp` does not exist on all Termux installs; the redirect
+into it fails with "Read-only file system"-adjacent errors.
+**Fix:** `mkdir -p "$(dirname "$IDX")"` before the curl.
+
+### 9. `ERR_MODULE_NOT_FOUND: Cannot find package 'cloakbrowser'` in dl.mjs
+
+**Where:** Step 2 downloader.
+**Cause:** `dl.mjs` lives in `$WORK` where there is no `node_modules`, and ESM
+resolution never looks at global npm packages. The empty `DL_OUT` cascaded into
+`CHROME_DIR="."`, which passed the `-d` check — a **false-positive** download
+that silently skipped patchelf (no binaries found) and the lib loop (chrome
+never ran, so no missing-lib output), until the smoke test failed with no
+diagnostic context.
+**Fix:** dl.mjs now resolves `cloakbrowser` by absolute path: deterministic
+candidate list (global MCP install + local source checkout), with a
+`find -L ... -name cloakbrowser` fallback. Step 2 validation now requires
+`$CHROME_DIR/chrome` to actually exist instead of trusting `dirname`.
+
+### 10. `find` returns nothing even though the directory obviously exists
+
+**Cause:** npm's global install can leave a **symlink** behind
+(`node_modules/@devinwangd/cloak-browser-mcp -> ~/cloak-browser-mcp-src`), and
+GNU find does not follow symlinks by default. Verified with
+`ls -la node_modules/@devinwangd/`.
+**Fix:** `find -L` with `-maxdepth 6` (the nested package sits 4–5 levels deep).
+
+### 11. `cloak-browser-mcp-termux --self-test` prints 33 tools, not 80
+
+**Cause:** the default capability set is a subset; 80 tools only register with
+`--caps all`.
+**Fix:** use `--self-test --caps all`; the MCP client config already passes
+`--caps all`.

@@ -47,7 +47,7 @@ The installer (~10–20 min, mostly the 200 MB Chromium download) does everythin
 Quick check without a client:
 
 ```bash
-cloak-browser-mcp-termux --self-test      # should print: 80 tools registered
+cloak-browser-mcp-termux --self-test --caps all   # should print: 80 tools registered
 ```
 
 ## Why this is non-trivial (the interesting part)
